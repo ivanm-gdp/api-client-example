@@ -3,11 +3,16 @@ import json
 import os
 
 from requests import post
-from src.helper import get_access_token, get_operations
+from src.helper import (
+    get_access_token,
+    get_operations,
+    pair_files,
+    should_group_documents,
+)
 
 
 class Project:
-    def __init__(self, base_url: str, id:str, secret:str):
+    def __init__(self, base_url: str, id: str, secret: str):
         self.base_url = base_url
         self.graphql_url = f"{base_url}/graphql"
         self.proxy_url = f"{base_url}/api/static/proxy/upload"
@@ -16,41 +21,70 @@ class Project:
         self.headers = None
 
     def create(self, team_id, operations_path, documents_path):
-        if (os.path.isfile(documents_path)):
-            raise NotImplementedError("createProject with a list of documents is not yet implemented")
+        if os.path.isfile(documents_path):
+            raise NotImplementedError(
+                "createProject with a list of documents is not yet implemented"
+            )
 
-        access_token = get_access_token(self.base_url, self.client_id, self.client_secret)
-        self.headers = self.__add_headers(key='Authorization', value=f"Bearer {access_token}")
+        access_token = get_access_token(
+            self.base_url, self.client_id, self.client_secret
+        )
+        self.headers = self.__add_headers(
+            key="Authorization", value=f"Bearer {access_token}"
+        )
         operations = get_operations(operations_path)
 
         operations["variables"]["input"]["documents"] = []
+        operations["variables"]["input"]["documentAssignments"] = None
         operations["variables"]["input"]["teamId"] = team_id
 
-        for filepath in glob.iglob(f"{documents_path}/*"):
-            upload_response = self.__upload_file(filepath=filepath)
-            documents = {
-                "document": {
-                    "name": filepath.split('/')[-1],
-                    "objectKey": upload_response["objectKey"]
-                }
-            }
-            operations["variables"]["input"]["documents"].append(documents)
+        raw_filepaths = list(glob.iglob(f"{documents_path}/*"))
+        document_list = [{"document": f} for f in raw_filepaths]
+        if should_group_documents(raw_filepaths, operations):
+            document_list = pair_files(raw_filepaths)
 
+        for document_to_upload in document_list:
+            upload_response = self.__upload_file(document_to_upload["document"])
+
+            document = {}
+            document["document"] = {
+                "name": os.path.split(document_to_upload["document"])[1],
+                "objectKey": upload_response["objectKey"],
+            }
+
+            if (
+                "extras" in document_to_upload
+                and len(document_to_upload["extras"]) > 0
+            ):
+                document["extras"] = []
+                for extra in document_to_upload["extras"]:
+                    upload_response = self.__upload_file(extra)
+                    document["extras"].append(
+                        {
+                            "name": os.path.split(extra)[1],
+                            "objectKey": upload_response["objectKey"],
+                        }
+                    )
+            
+            operations["variables"]["input"]["documents"].append(document)
+        
         graphql_response = self.__call_graphql(
             data={
                 "query": operations["query"],
                 "variables": json.dumps(operations["variables"]),
-                "operationName": operations.get("operationName", "Datasaur API client - createProject")
+                "operationName": operations.get(
+                    "operationName", "Datasaur API client - createProject"
+                ),
             }
         )
         self.__process_graphql_response(graphql_response)
-  
+
     def __upload_file(self, filepath):
         with post(
-        url=self.proxy_url,
-        headers=self.headers,
-        files=[('file', open(filepath, 'rb'))]
-        ) as response: 
+            url=self.proxy_url,
+            headers=self.headers,
+            files=[("file", open(filepath, "rb"))],
+        ) as response:
             response.raise_for_status()
             return response.json()
 
@@ -71,10 +105,10 @@ class Project:
         else:
             print(response.text.encode("utf8"))
             print(response)
-    
+
     def __add_headers(self, key, value):
         if self.headers is None:
-            self.headers = {key: value} 
+            self.headers = {key: value}
         else:
             self.headers[key] = value
 
